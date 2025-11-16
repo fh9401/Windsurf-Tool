@@ -18,6 +18,7 @@
     "build:win:docker": "./build-docker.sh",
     "build:linux": "electron-builder --linux",
     "build:linux:x64": "electron-builder --linux --x64",
+    "test:switch-with-reset": "electron test-account-switch-with-reset.js",
     "postinstall": "node -e \"const fs = require('fs'); const path = require('path'); const dir = path.join(__dirname, 'scripts'); if(fs.existsSync(dir)) { fs.readdirSync(dir).filter(f => f.endsWith('.py')).forEach(f => { const p = path.join(dir, f); if(process.platform !== 'win32') fs.chmodSync(p, 0o755); }); }\""
   },
   "keywords": [

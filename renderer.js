@@ -190,9 +190,9 @@ function showSponsorPopup() {
         </button>
         
         <!-- 内容区域 -->
-        <div style="padding: 48px 40px 40px;">
+        <div style="padding: 36px 32px 32px;">
           <!-- 图标和标题 -->
-          <div style="text-align: center; margin-bottom: 28px;">
+          <div style="text-align: center; margin-bottom: 20px;">
             <!-- 跪求表情包图片 -->
             <div style="
               margin-bottom: 20px;
@@ -201,8 +201,8 @@ function showSponsorPopup() {
               position: relative;
             ">
               <img src="pay/IMG_4702.jpeg" alt="跪求赞助" style="
-                width: 140px;
-                height: 140px;
+                width: 100px;
+                height: 100px;
                 border-radius: 20px;
                 box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
                 object-fit: cover;
@@ -247,8 +247,8 @@ function showSponsorPopup() {
           <div style="
             background: linear-gradient(135deg, #fff5f5 0%, #ffe6e6 100%);
             border-radius: 16px;
-            padding: 24px;
-            margin-bottom: 28px;
+            padding: 20px;
+            margin-bottom: 20px;
             border: 2px dashed #ffcccc;
           ">
             <div style="text-align: center; margin-bottom: 16px;">
@@ -3156,76 +3156,8 @@ async function detectWindsurfPaths() {
   }
 }
 
-// 监听切换进度
-window.ipcRenderer.on('switch-progress', (event, progress) => {
-  const statusEl = document.getElementById('switchStatus');
-  const logDiv = statusEl.querySelector('.log-container');
-  
-  if (logDiv) {
-    // 如果已有日志容器，只更新进度
-    const progressDiv = statusEl.querySelector('.progress-info');
-    if (progressDiv) {
-      progressDiv.innerHTML = `<strong>步骤 ${progress.step}/5:</strong> ${progress.message}`;
-    }
-  } else {
-    // 首次显示，创建完整结构
-    statusEl.innerHTML = `
-      <div class="status-message status-info">
-        <div class="progress-info">
-          <strong>步骤 ${progress.step}/5:</strong> ${progress.message}
-        </div>
-        <div class="log-container" style="margin-top:15px; max-height:600px; overflow-y:auto; background:#f5f5f5; padding:10px; border-radius:4px; font-family:monospace; font-size:12px; line-height:1.6;">
-          <div class="log-content"></div>
-        </div>
-      </div>
-    `;
-  }
-});
-
-// 监听实时日志
-window.ipcRenderer.on('switch-log', (event, log) => {
-  const statusEl = document.getElementById('switchStatus');
-  let logContent = statusEl.querySelector('.log-content');
-  
-  if (!logContent) {
-    // 如果没有日志容器，创建一个
-    statusEl.innerHTML = `
-      <div class="status-message status-info">
-        <div class="log-container" style="max-height:600px; overflow-y:auto; background:#f5f5f5; padding:10px; border-radius:4px; font-family:monospace; font-size:12px; line-height:1.6;">
-          <div class="log-content"></div>
-        </div>
-      </div>
-    `;
-    logContent = statusEl.querySelector('.log-content');
-  }
-  
-  // 添加日志
-  const logLine = document.createElement('div');
-  logLine.textContent = log;
-  logLine.style.marginBottom = '2px';
-  
-  // 根据日志内容设置颜色
-  if (log.includes('✓') || log.includes('✅') || log.includes('成功')) {
-    logLine.style.color = '#27ae60';
-  } else if (log.includes('✗') || log.includes('❌') || log.includes('失败') || log.includes('错误')) {
-    logLine.style.color = '#e74c3c';
-  } else if (log.includes('⚠️') || log.includes('警告')) {
-    logLine.style.color = '#f39c12';
-  } else if (log.includes('步骤') || log.includes('【') || log.includes('=====')) {
-    logLine.style.color = '#3498db';
-    logLine.style.fontWeight = 'bold';
-  } else if (log.includes('💡')) {
-    logLine.style.color = '#f39c12';
-  }
-  
-  logContent.appendChild(logLine);
-  
-  // 自动滚动到底部
-  const logContainer = logContent.parentElement;
-  if (logContainer) {
-    logContainer.scrollTop = logContainer.scrollHeight;
-  }
-});
+// 切换账号的日志已经在弹窗中显示，不需要在页面上显示
+// 这些监听器已被移除，所有日志都在 switchToAccount 函数创建的弹窗中显示
 
 // 监听错误
 window.ipcRenderer.on('switch-error', (event, error) => {
@@ -3477,44 +3409,8 @@ function resetLanguageSelection() {
   }
 }
 
-function addDomain() {
-  const input = document.getElementById('newDomain').value.trim();
-  
-  if (!input) {
-    alert(t('pleaseEnterDomain'));
-    return;
-  }
-  
-  // 按行分割,支持批量添加
-  const domains = input.split('\n')
-    .map(d => d.trim())
-    .filter(d => d.length > 0);
-  
-  let addedCount = 0;
-  let skippedCount = 0;
-  
-  domains.forEach(domain => {
-    if (!currentConfig.emailDomains.includes(domain)) {
-      currentConfig.emailDomains.push(domain);
-      addedCount++;
-    } else {
-      skippedCount++;
-    }
-  });
-  
-  if (addedCount > 0) {
-    document.getElementById('newDomain').value = '';
-    renderSettingsFromCurrentConfig();
-    alert(`成功添加 ${addedCount} 个域名${skippedCount > 0 ? `，跳过 ${skippedCount} 个重复域名` : ''}`);
-  } else {
-    alert('所有域名都已存在');
-  }
-}
-
-function removeDomain(domain) {
-  currentConfig.emailDomains = currentConfig.emailDomains.filter(d => d !== domain);
-  renderSettingsFromCurrentConfig();
-}
+// 域名管理功能已移至 domainManager.js
+// addDomain 和 removeDomain 函数现在由 domainManager.js 提供
 
 // 快速填充IMAP配置
 function fillImapConfig() {

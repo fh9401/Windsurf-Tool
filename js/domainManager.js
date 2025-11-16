@@ -13,13 +13,20 @@ const DomainManager = {
    */
   async init() {
     try {
+      if (!window.ConfigManager) {
+        console.error('❌ ConfigManager 未定义');
+        this.domains = [];
+        this.renderDomains();
+        return;
+      }
+      
       const result = await window.ConfigManager.loadConfig();
+      
       if (result.success && result.config) {
         this.domains = result.config.emailDomains || [];
         this.renderDomains();
-        console.log('✅ 域名列表加载成功:', this.domains);
       } else {
-        console.warn('⚠️ 加载配置失败，使用空域名列表');
+        console.warn('⚠️ 加载配置失败:', result.message || '未知');
         this.domains = [];
         this.renderDomains();
       }
@@ -112,18 +119,30 @@ const DomainManager = {
    */
   async saveDomains() {
     try {
+      console.log('💾 开始保存域名到配置文件...');
+      console.log('📋 要保存的域名列表:', this.domains);
+      
       const result = await window.ConfigManager.loadConfig();
+      console.log('📥 加载配置结果:', result);
+      
       if (result.success && result.config) {
         const config = result.config;
+        console.log('📦 当前配置:', config);
+        
         config.emailDomains = this.domains;
+        console.log('📝 更新后的配置:', config);
         
         const saveResult = await window.ConfigManager.saveConfig(config);
+        console.log('💾 保存结果:', saveResult);
+        
         return saveResult;
       } else {
+        console.error('❌ 加载配置失败:', result.message);
         return { success: false, message: '加载配置失败' };
       }
     } catch (error) {
       console.error('❌ 保存域名失败:', error);
+      console.error('错误堆栈:', error.stack);
       return { success: false, message: error.message };
     }
   },
@@ -134,9 +153,11 @@ const DomainManager = {
   renderDomains() {
     const container = document.getElementById('domainTags');
     const countEl = document.getElementById('domainCount');
-    const emptyHint = document.getElementById('emptyDomainHint');
     
-    if (!container) return;
+    if (!container) {
+      console.error('❌ 找不到域名容器元素 (ID: domainTags)');
+      return;
+    }
     
     // 更新计数
     if (countEl) {
@@ -209,33 +230,22 @@ function handleDomainInputKeyPress(event) {
 
 async function addDomain() {
   try {
-    console.log('🔍 开始添加域名...');
+    // 使用更可靠的方式获取输入框
+    let input = document.getElementById('domainInput');
     
-    // 等待 DOM 完全加载
-    if (document.readyState !== 'complete') {
-      console.warn('⚠️ DOM 未完全加载，等待中...');
-      await new Promise(resolve => {
-        if (document.readyState === 'complete') {
-          resolve();
-        } else {
-          window.addEventListener('load', resolve, { once: true });
-        }
-      });
+    // 如果第一次获取失败，等待并重试
+    if (!input) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      input = document.getElementById('domainInput');
     }
     
-    const input = document.getElementById('domainInput');
-    console.log('🔍 输入框元素:', input);
-    
     if (!input) {
-      console.error('❌ 找不到域名输入框元素 (ID: domainInput)');
-      console.error('📋 当前 DOM 状态:', document.readyState);
-      console.error('📋 body 存在:', !!document.body);
-      alert('系统错误：找不到输入框\n请刷新页面后重试');
+      console.error('❌ 找不到域名输入框元素');
+      alert('系统错误：找不到输入框\n请确保在系统设置页面操作');
       return;
     }
     
-    const domain = input.value ? input.value.trim() : '';
-    console.log('🔍 输入的域名:', domain);
+    const domain = (input.value || '').trim();
     
     if (!domain) {
       alert('请输入域名');
@@ -245,12 +255,12 @@ async function addDomain() {
     
     console.log('📤 正在添加域名:', domain);
     const result = await DomainManager.addDomain(domain);
-    console.log('📥 添加结果:', result);
+    console.log('📥 添加结果:', JSON.stringify(result, null, 2));
     
     if (result.success) {
       input.value = '';
       input.focus();
-      console.log('✅ 域名添加成功');
+      console.log('✅ 域名添加成功，当前域名列表:', DomainManager.domains);
     } else {
       alert(result.message || '添加域名失败');
       console.error('❌ 添加失败:', result.message);

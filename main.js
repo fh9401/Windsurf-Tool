@@ -859,7 +859,7 @@ ipcMain.handle('test-imap', async (event, config) => {
 // ==================== 账号切换 ====================
 
 // 切换账号
-ipcMain.handle('switch-account', async (event, account) => {
+ipcMain.handle('switch-account', async (event, account, skipClose = false) => {
   if (!isOperationAllowed('switch-account')) {
     return { success: false, error: '当前状态下无法执行此操作' };
   }
@@ -871,7 +871,7 @@ ipcMain.handle('switch-account', async (event, account) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('switch-log', log);
       }
-    });
+    }, skipClose);
     
     return result;
   } catch (error) {

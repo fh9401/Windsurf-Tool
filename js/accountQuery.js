@@ -68,9 +68,6 @@ const AccountQuery = {
         // 解析响应
         const planStatus = response.data.planStatus || response.data;
         
-        // 打印完整响应以便调试
-        console.log('[账号查询] API 响应数据:', JSON.stringify(planStatus, null, 2));
-        
         return {
           planName: planStatus.planInfo?.planName || 'Free',
           usedCredits: Math.round((planStatus.usedPromptCredits || 0) / 100),
@@ -143,14 +140,9 @@ const AccountQuery = {
    */
   async queryAllAccounts(accounts) {
     const results = [];
-    let successCount = 0;
-    let failCount = 0;
-    
-    console.log(`[账号查询] 开始查询 ${accounts.length} 个账号...`);
     
     for (let i = 0; i < accounts.length; i++) {
       const account = accounts[i];
-      console.log(`[账号查询] 正在查询第 ${i + 1}/${accounts.length} 个账号: ${account.email}`);
       
       try {
         const result = await this.queryAccount(account);
@@ -159,16 +151,11 @@ const AccountQuery = {
           ...result
         });
         
-        if (result.success) {
-          successCount++;
-          console.log(`[账号查询] ✅ ${account.email} - ${result.planName} - ${result.usedCredits}/${result.totalCredits}`);
-        } else {
-          failCount++;
-          console.log(`[账号查询] ❌ ${account.email} - 查询失败: ${result.error}`);
+        if (!result.success) {
+          console.error(`[账号查询] ❌ ${account.email} - ${result.error}`);
         }
       } catch (error) {
-        failCount++;
-        console.error(`[账号查询] ❌ ${account.email} - 异常:`, error);
+        console.error(`[账号查询] ❌ ${account.email} - ${error.message}`);
         results.push({
           email: account.email,
           success: false,
@@ -183,8 +170,6 @@ const AccountQuery = {
       // 避免请求过快，延迟 500ms
       await new Promise(resolve => setTimeout(resolve, 500));
     }
-    
-    console.log(`[账号查询] 查询完成: 成功 ${successCount} 个, 失败 ${failCount} 个`);
     
     return results;
   }
@@ -205,35 +190,26 @@ if (typeof window !== 'undefined') {
  */
 async function updateAccountsUsage() {
   try {
-    console.log('[自动查询] ========== 开始查询账号使用情况 ==========');
-    console.log('[自动查询] 查询时间:', new Date().toLocaleString('zh-CN'));
-    
     // 获取所有账号
-    const accounts = await window.ipcRenderer.invoke('get-accounts');
+    const result = await window.ipcRenderer.invoke('get-accounts');
     
-    if (!accounts || accounts.length === 0) {
-      console.log('[自动查询] 没有账号需要查询');
+    if (!result || !result.success || !result.accounts) {
       return;
     }
     
-    console.log(`[自动查询] 获取到 ${accounts.length} 个账号，开始批量查询...`);
+    const accounts = result.accounts;
     
     // 批量查询
     const results = await AccountQuery.queryAllAccounts(accounts);
     
     // 更新 UI
-    console.log('[自动查询] 开始更新 UI...');
     let updateCount = 0;
-    
     results.forEach(result => {
       const updated = updateAccountUI(result.email, result);
       if (updated) {
         updateCount++;
       }
     });
-    
-    console.log(`[自动查询] UI 更新完成: ${updateCount}/${results.length} 个账号`);
-    console.log('[自动查询] ========== 查询完成 ==========\n');
   } catch (error) {
     console.error('[自动查询] 查询失败:', error);
   }

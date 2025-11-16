@@ -69,3 +69,12 @@ $RECYCLE.BIN/
 *.tmp
 *.temp
 .cache/
+
+# Test files with sensitive data
+test-*.js
+check-*.js
+verify-*.js
+
+# Backup files
+*.backup
+*.bak

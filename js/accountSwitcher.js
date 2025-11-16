@@ -317,18 +317,27 @@ class AccountSwitcher {
     // 使用 Cloudflare Workers 中转（国内可访问）
     const WORKER_URL = 'https://windsurf.crispvibe.cn';
     
-    const response = await axios.post(
-      `${WORKER_URL}/token?key=${FIREBASE_API_KEY}`,
-      formData.toString(),
-      {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    try {
+      const response = await axios.post(
+        `${WORKER_URL}/token?key=${FIREBASE_API_KEY}`,
+        formData.toString(),
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          }
         }
+      );
+      
+      return response.data.id_token;
+    } catch (error) {
+      // 打印详细错误信息
+      if (error.response) {
+        console.error('Workers 返回错误:', error.response.data);
+        throw new Error(`Workers 错误: ${JSON.stringify(error.response.data)}`);
       }
-    );
-    
-    return response.data.id_token;
+      throw error;
+    }
   }
   
   /**
@@ -366,12 +375,13 @@ class AccountSwitcher {
     const originalUserData = app.getPath('userData');
     
     try {
-      // 临时设置为 Windsurf 的 userData
+      // 临时设置为 Windsurf 的 userData (关键：确保加密同源)
       app.setPath('userData', windsurfUserData);
       
       const jsonString = JSON.stringify(sessionsData);
       const encrypted = safeStorage.encryptString(jsonString);
       
+      console.log('[加密] ✅ 加密成功，userData:', windsurfUserData);
       return encrypted;
     } finally {
       // 恢复原始 userData
@@ -387,6 +397,12 @@ class AccountSwitcher {
     const dbPath = WindsurfPathDetector.getDBPath();
     
     try {
+      // 检查值是否为 null 或 undefined
+      if (value === null || value === undefined) {
+        console.error(`❌ 尝试写入 null/undefined 值到 key: ${key}`);
+        throw new Error(`Cannot write null/undefined value to key: ${key}`);
+      }
+      
       // 读取数据库文件
       const dbBuffer = await fs.readFile(dbPath);
       
@@ -395,10 +411,27 @@ class AccountSwitcher {
       const db = new SQL.Database(dbBuffer);
       
       try {
-        // 如果 value 是对象，转为 JSON 字符串
-        const finalValue = typeof value === 'object' && !Buffer.isBuffer(value) 
-          ? JSON.stringify(value) 
-          : value;
+        let finalValue;
+        
+        // 处理不同类型的值
+        if (Buffer.isBuffer(value)) {
+          // Buffer 需要转为 JSON 格式的字符串（Windsurf 的存储格式）
+          finalValue = JSON.stringify({
+            type: 'Buffer',
+            data: Array.from(value)
+          });
+        } else if (typeof value === 'object') {
+          // 普通对象转为 JSON 字符串
+          finalValue = JSON.stringify(value);
+          // 验证 JSON 字符串不是 "null"
+          if (finalValue === 'null') {
+            console.error(`❌ JSON.stringify 返回 "null" for key: ${key}`, value);
+            throw new Error(`JSON.stringify returned "null" for key: ${key}`);
+          }
+        } else {
+          // 字符串直接使用
+          finalValue = value;
+        }
         
         // 执行插入或更新
         db.run('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)', [key, finalValue]);
@@ -436,9 +469,43 @@ class AccountSwitcher {
   }
   
   /**
-   * 切换账号（主函数）
+   * 重置机器 ID
    */
-  static async switchAccount(account, logCallback = null) {
+  static async resetMachineId() {
+    const { v4: uuidv4 } = require('uuid');
+    const crypto = require('crypto');
+    const storageJsonPath = path.join(process.env.HOME, 'Library/Application Support/Windsurf/User/globalStorage/storage.json');
+    
+    try {
+      // 生成新的机器 ID
+      const newMachineId = crypto.createHash('sha256').update(uuidv4()).digest('hex');
+      const newSqmId = `{${uuidv4()}}`;
+      const newDevDeviceId = uuidv4();
+      
+      // 读取 storage.json
+      const storageData = JSON.parse(await fs.readFile(storageJsonPath, 'utf-8'));
+      
+      // 更新机器 ID
+      storageData.machineId = newMachineId;
+      storageData.sqmId = newSqmId;
+      storageData.devDeviceId = newDevDeviceId;
+      
+      // 写回文件
+      await fs.writeFile(storageJsonPath, JSON.stringify(storageData, null, 2));
+      
+      return { newMachineId, newSqmId, newDevDeviceId };
+    } catch (error) {
+      throw new Error(`重置机器 ID 失败: ${error.message}`);
+    }
+  }
+  
+  /**
+   * 切换账号（主函数）
+   * @param {Object} account - 账号信息
+   * @param {Function} logCallback - 日志回调函数
+   * @param {Boolean} skipClose - 是否跳过关闭 Windsurf（直接写入）
+   */
+  static async switchAccount(account, logCallback = null, skipClose = false) {
     const log = (msg) => {
       console.log(msg);
       if (logCallback) logCallback(msg);
@@ -448,117 +515,387 @@ class AccountSwitcher {
       log('[切号] ========== 开始切换账号 ==========');
       log(`[切号] 目标账号: ${account.email}`);
       
-      // 1. 检查 Windsurf 是否已安装
-      const isInstalled = await WindsurfPathDetector.isInstalled();
-      if (!isInstalled) {
-        throw new Error('未检测到 Windsurf，请确保已安装');
-      }
-      log('[切号] ✅ Windsurf 已安装');
-      
-      // 2. 检查并关闭 Windsurf
-      const isRunning = await WindsurfPathDetector.isRunning();
-      if (isRunning) {
-        log('[切号] ⚠️ 检测到 Windsurf 正在运行');
-        log('[切号] 正在自动关闭 Windsurf...');
+      // ========== 步骤 1: 检查并关闭 Windsurf ==========
+      if (skipClose) {
+        log('[切号] ========== 步骤 1: 跳过关闭 Windsurf（直接写入模式）==========');
+        log('[切号] ⚠️  将在 Windsurf 运行时直接写入数据');
+      } else {
+        log('[切号] ========== 步骤 1: 检查并关闭 Windsurf ==========');
         
-        try {
+        const isInstalled = await WindsurfPathDetector.isInstalled();
+        if (!isInstalled) {
+          throw new Error('未检测到 Windsurf，请确保已安装');
+        }
+        log('[切号] ✅ Windsurf 已安装');
+        
+        const isRunning = await WindsurfPathDetector.isRunning();
+        if (isRunning) {
+          log('[切号] 正在关闭 Windsurf...');
           await WindsurfPathDetector.closeWindsurf();
           
-          // 再次检查
+          // 等待进程完全关闭
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          
           const stillRunning = await WindsurfPathDetector.isRunning();
           if (stillRunning) {
-            log('[切号] ⚠️ 检测到进程可能仍在运行');
-            log('[切号] ⚠️ 继续执行切换，如果失败请手动关闭 Windsurf 后重试');
-          } else {
-            log('[切号] ✅ Windsurf 已关闭');
+            throw new Error('Windsurf 进程未能关闭，请手动关闭后重试');
           }
-        } catch (error) {
-          log(`[切号] ⚠️ 关闭过程出现问题: ${error.message}`);
-          log('[切号] ⚠️ 继续执行切换，如果失败请手动关闭 Windsurf 后重试');
+          log('[切号] ✅ Windsurf 已关闭');
+        } else {
+          log('[切号] ✅ Windsurf 未运行');
         }
+      }
+      
+      // ========== 步骤 2: 重置机器 ID ==========
+      log('[切号] ========== 步骤 2: 重置机器 ID ==========');
+      
+      const { newMachineId, newSqmId, newDevDeviceId } = await this.resetMachineId();
+      log(`[切号] ✅ 机器 ID 已重置`);
+      log(`[切号]    machineId: ${newMachineId.substring(0, 16)}...`);
+      log(`[切号]    sqmId: ${newSqmId}`);
+      log(`[切号]    devDeviceId: ${newDevDeviceId}`);
+      
+      // ========== 步骤 3: 获取账号凭证 ==========
+      log('[切号] ========== 步骤 3: 获取账号凭证 ==========');
+      
+      let apiKey, name, apiServerUrl;
+      
+      // 优先使用账号文件中已有的数据
+      if (account.apiKey && account.name && account.apiServerUrl) {
+        log('[切号] 使用账号文件中已有的凭证数据...');
+        apiKey = account.apiKey;
+        name = account.name;
+        apiServerUrl = account.apiServerUrl;
+        log(`[切号] ✅ 使用已有数据`);
+        log(`[切号]    用户名: ${name}`);
+        log(`[切号]    API Key: ${apiKey.substring(0, 20)}...`);
+        log(`[切号]    Server URL: ${apiServerUrl}`);
       } else {
-        log('[切号] ✅ Windsurf 未运行');
+        // 如果账号文件中没有，则通过 API 获取
+        if (!account.refreshToken) {
+          throw new Error('账号缺少 refreshToken 和 apiKey，无法切换');
+        }
+        
+        log('[切号] 账号文件中缺少凭证数据，通过 API 获取...');
+        log('[切号] 正在获取 access_token...');
+        const accessToken = await this.getAccessToken(account.refreshToken);
+        log('[切号] ✅ 获取 access_token 成功');
+        
+        log('[切号] 正在获取 api_key...');
+        const apiKeyInfo = await this.getApiKey(accessToken);
+        apiKey = apiKeyInfo.apiKey;
+        name = apiKeyInfo.name;
+        apiServerUrl = apiKeyInfo.apiServerUrl;
+        log('[切号] ✅ 获取 api_key 成功');
+        log(`[切号]    用户名: ${name}`);
+        log(`[切号]    API Key: ${apiKey.substring(0, 20)}...`);
+        log(`[切号]    Server URL: ${apiServerUrl}`);
+        
+        // 保存到账号文件，以便下次直接使用
+        log('[切号] 保存凭证数据到账号文件...');
+        try {
+          const { app } = require('electron');
+          const accountsFilePath = path.join(app.getPath('userData'), 'accounts.json');
+          let accounts = [];
+          try {
+            const data = await fs.readFile(accountsFilePath, 'utf-8');
+            accounts = JSON.parse(data);
+          } catch (e) {
+            log('[切号] ⚠️ 读取账号文件失败，跳过保存');
+          }
+          
+          const accountIndex = accounts.findIndex(acc => acc.id === account.id || acc.email === account.email);
+          if (accountIndex !== -1) {
+            accounts[accountIndex] = {
+              ...accounts[accountIndex],
+              apiKey,
+              name,
+              apiServerUrl,
+              updatedAt: new Date().toISOString()
+            };
+            await fs.writeFile(accountsFilePath, JSON.stringify(accounts, null, 2), { encoding: 'utf-8' });
+            log('[切号] ✅ 凭证数据已保存到账号文件');
+          }
+        } catch (e) {
+          log(`[切号] ⚠️ 保存凭证数据失败: ${e.message}`);
+        }
       }
       
-      // 3. 检查账号是否有 refreshToken
-      if (!account.refreshToken) {
-        throw new Error('账号缺少 refreshToken，无法切换');
+      // ========== 步骤 4: 重置机器码 ==========
+      log('[切号] ========== 步骤 4: 重置机器码 ==========');
+      
+      // 4.1 关闭 Windsurf 并重置机器码
+      log('[切号] 正在关闭 Windsurf 并重置机器码...');
+      const { fullResetWindsurf } = require('../src/machineIdResetter');
+      
+      try {
+        const resetResult = await fullResetWindsurf();
+        if (resetResult.success) {
+          log('[切号] ✅ 机器码重置成功');
+          log(`[切号]    主机器ID: ${resetResult.machineIds.mainMachineId}`);
+          log(`[切号]    遥测ID: ${resetResult.machineIds.telemetryMachineId.substring(0, 16)}...`);
+          log(`[切号]    SQM ID: ${resetResult.machineIds.sqmId}`);
+          log(`[切号]    开发设备ID: ${resetResult.machineIds.devDeviceId}`);
+          log(`[切号]    服务ID: ${resetResult.machineIds.serviceMachineId}`);
+        } else {
+          log(`[切号] ⚠️ 机器码重置失败: ${resetResult.error}`);
+          log('[切号] 继续执行账号切换...');
+        }
+      } catch (error) {
+        log(`[切号] ⚠️ 机器码重置出错: ${error.message}`);
+        log('[切号] 继续执行账号切换...');
       }
       
-      // 4. 获取 access_token
-      log('[切号] 正在获取 access_token...');
-      const accessToken = await this.getAccessToken(account.refreshToken);
-      log('[切号] ✅ 获取 access_token 成功');
+      // 等待一下确保文件系统操作完成
+      await new Promise(resolve => setTimeout(resolve, 1000));
       
-      // 5. 获取 api_key
-      log('[切号] 正在获取 api_key...');
-      const { apiKey, name, apiServerUrl } = await this.getApiKey(accessToken);
-      log('[切号] ✅ 获取 api_key 成功');
+      // ========== 步骤 5: 写入数据库 ==========
+      log('[切号] ========== 步骤 5: 写入数据库 ==========');
       
-      // 6. 构建 sessions 数据
-      log('[切号] 正在构建 sessions 数据...');
+      // 5.1 删除旧账号数据
+      log('[切号] 清理旧账号数据...');
+      const initSqlJs = require('sql.js');
+      const dbPath = WindsurfPathDetector.getDBPath();
+      let dbBuffer = await fs.readFile(dbPath);
+      let SQL = await initSqlJs();
+      let db = new SQL.Database(dbBuffer);
+      
+      const oldKeysResult = db.exec(`SELECT key FROM ItemTable WHERE key LIKE 'windsurf_auth-%'`);
+      if (oldKeysResult.length > 0 && oldKeysResult[0].values.length > 0) {
+        for (const row of oldKeysResult[0].values) {
+          db.run('DELETE FROM ItemTable WHERE key = ?', [row[0]]);
+        }
+        const data = db.export();
+        await fs.writeFile(dbPath, data);
+        log(`[切号] ✅ 已删除 ${oldKeysResult[0].values.length} 个旧账号 key`);
+      }
+      db.close();
+      
+      // 5.2 构建 sessions 数据（直接创建新的，不需要解密修改）
+      log('[切号] 构建 sessions 数据...');
+      const sessionsKey = 'secret://{"extensionId":"codeium.windsurf","key":"windsurf_auth.sessions"}';
+      
+      const sessionId = uuidv4();
       const sessionsData = [{
-        id: uuidv4(),
+        id: sessionId,
         accessToken: apiKey,
-        account: {
-          label: name,
-          id: name
-        },
+        account: { label: name, id: name },
         scopes: []
       }];
       
-      // 7. 加密 sessions 数据
-      log('[切号] 正在加密 sessions 数据...');
+      log('[切号] Sessions 数据结构:');
+      log(`[切号]    id: ${sessionId}`);
+      log(`[切号]    accessToken: ${apiKey}`);
+      log(`[切号]    account.label: ${name}`);
+      log(`[切号]    account.id: ${name}`);
+      log(`[切号]    scopes: []`);
+      
+      // 加密 sessions 数据
+      log('[切号] 加密 sessions 数据...');
       const encrypted = this.encryptSessions(sessionsData);
-      log('[切号] ✅ 加密成功');
       
-      // 8. 写入 sessions 到数据库
-      log('[切号] 正在写入 sessions 到数据库...');
-      const sessionsKey = 'secret://{"extensionId":"codeium.windsurf","key":"windsurf_auth.sessions"}';
+      // 验证加密结果
+      if (!encrypted || !Buffer.isBuffer(encrypted)) {
+        throw new Error('Sessions 数据加密失败：返回的不是 Buffer');
+      }
+      if (encrypted.length === 0) {
+        throw new Error('Sessions 数据加密失败：Buffer 长度为 0');
+      }
+      
+      log(`[切号] 加密后 Buffer 长度: ${encrypted.length} 字节`);
+      log(`[切号] 前 20 字节: [${Array.from(encrypted.slice(0, 20)).join(', ')}]`);
+      
+      // 5.3 写入所有必需数据
+      log('[切号] 写入账号数据...');
+      log(`[切号] 写入 key: ${sessionsKey}`);
       await this.writeToDB(sessionsKey, encrypted);
-      log('[切号] ✅ sessions 写入成功');
       
-      // 9. 写入 windsurfAuthStatus（账号状态）
-      log('[切号] 正在写入 windsurfAuthStatus...');
+      // 立即验证写入
+      const verifySessionsBuffer = await fs.readFile(dbPath);
+      const verifySessionsSQL = await initSqlJs();
+      const verifySessionsDb = new verifySessionsSQL.Database(verifySessionsBuffer);
+      const verifySessionsResult1 = verifySessionsDb.exec('SELECT value FROM ItemTable WHERE key = ?', [sessionsKey]);
+      verifySessionsDb.close();
+      
+      if (verifySessionsResult1.length > 0 && verifySessionsResult1[0].values.length > 0) {
+        log('[切号] ✅ Sessions 写入成功并已验证');
+      } else {
+        throw new Error('Sessions 写入后验证失败：数据库中未找到数据');
+      }
+      
+      const teamId = uuidv4();
       const authStatus = {
-        name: name,
-        apiKey: apiKey,
-        email: account.email,
-        teamId: uuidv4(),
-        planName: "Pro"
+        name, apiKey, email: account.email,
+        teamId, planName: "Pro"
       };
+      log('[切号] 写入 windsurfAuthStatus:');
+      log(`[切号]    name: ${name}`);
+      log(`[切号]    apiKey: ${apiKey}`);
+      log(`[切号]    email: ${account.email}`);
+      log(`[切号]    teamId: ${teamId}`);
+      log(`[切号]    planName: Pro`);
       await this.writeToDB('windsurfAuthStatus', authStatus);
-      log('[切号] ✅ windsurfAuthStatus 写入成功');
       
-      // 10. 写入 codeium.windsurf 配置
-      log('[切号] 正在写入 codeium.windsurf 配置...');
+      // 立即验证写入
+      const verifyAuthBuffer = await fs.readFile(dbPath);
+      const verifyAuthSQL = await initSqlJs();
+      const verifyAuthDb = new verifyAuthSQL.Database(verifyAuthBuffer);
+      const verifyAuthResult1 = verifyAuthDb.exec('SELECT value FROM ItemTable WHERE key = ?', ['windsurfAuthStatus']);
+      verifyAuthDb.close();
+      
+      if (verifyAuthResult1.length > 0 && verifyAuthResult1[0].values.length > 0) {
+        const verifyAuthValue = verifyAuthResult1[0].values[0][0];
+        if (verifyAuthValue === 'null' || verifyAuthValue === null) {
+          throw new Error('windsurfAuthStatus 写入后验证失败：值为 null');
+        }
+        try {
+          const parsed = JSON.parse(verifyAuthValue);
+          if (!parsed || !parsed.email) {
+            throw new Error('windsurfAuthStatus 写入后验证失败：解析后数据无效');
+          }
+          log(`[切号] ✅ windsurfAuthStatus 写入成功并已验证: ${parsed.email}`);
+        } catch (e) {
+          throw new Error(`windsurfAuthStatus 写入后验证失败：JSON 解析错误 - ${e.message}`);
+        }
+      } else {
+        throw new Error('windsurfAuthStatus 写入后验证失败：数据库中未找到数据');
+      }
+      
+      const installationId = uuidv4();
       const codeiumConfig = {
-        "codeium.installationId": uuidv4(),
+        "codeium.installationId": installationId,
         "apiServerUrl": apiServerUrl || "https://server.self-serve.windsurf.com",
         "codeium.hasOneTimeUpdatedUnspecifiedMode": true
       };
+      log('[切号] 写入 codeium.windsurf:');
+      log(`[切号]    installationId: ${installationId}`);
+      log(`[切号]    apiServerUrl: ${codeiumConfig.apiServerUrl}`);
       await this.writeToDB('codeium.windsurf', codeiumConfig);
-      log('[切号] ✅ codeium.windsurf 配置写入成功');
+      log('[切号] ✅ codeium.windsurf 写入成功');
       
-      // 11. 写入 codeium.windsurf-windsurf_auth（用户名）
-      log('[切号] 正在写入用户名...');
+      log(`[切号] 写入 codeium.windsurf-windsurf_auth: ${name}`);
       await this.writeToDB('codeium.windsurf-windsurf_auth', name);
-      log('[切号] ✅ 用户名写入成功');
+      log('[切号] ✅ codeium.windsurf-windsurf_auth 写入成功');
       
-      log('[切号] ========== 切换账号成功 ==========');
-      log(`[切号] 当前账号: ${account.email}`);
-      log(`[切号] 用户名: ${name}`);
+      log('[切号] ✅ 所有数据写入完成');
       
-      // 12. 自动启动 Windsurf
-      log('[切号] 正在启动 Windsurf...');
-      try {
+      // 5.4 等待文件系统同步
+      log('[切号] 等待文件系统同步...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      log('[切号] ✅ 数据同步完成');
+      
+      // 5.5 验证数据写入
+      log('[切号] ========== 验证数据写入 ==========');
+      const initSqlJsVerify = require('sql.js');
+      const verifyBuffer = await fs.readFile(dbPath);
+      const SQLVerify = await initSqlJsVerify();
+      const verifyDb = new SQLVerify.Database(verifyBuffer);
+      
+      // 验证 sessions
+      const verifySessionsResult = verifyDb.exec('SELECT value FROM ItemTable WHERE key = ?', [sessionsKey]);
+      if (verifySessionsResult.length > 0) {
+        const val = verifySessionsResult[0].values[0][0];
+        const parsed = JSON.parse(val);
+        log(`[切号] ✅ Sessions 已验证: Buffer 长度 ${parsed.data ? parsed.data.length : 0}`);
+      } else {
+        log('[切号] ❌ Sessions 未找到！');
+      }
+      
+      // 验证 windsurfAuthStatus
+      const verifyAuthResult = verifyDb.exec('SELECT value FROM ItemTable WHERE key = ?', ['windsurfAuthStatus']);
+      if (verifyAuthResult.length > 0) {
+        const val = JSON.parse(verifyAuthResult[0].values[0][0]);
+        log(`[切号] ✅ windsurfAuthStatus 已验证: ${val.email} / ${val.name}`);
+      } else {
+        log('[切号] ❌ windsurfAuthStatus 未找到！');
+      }
+      
+      verifyDb.close();
+      
+      // ========== 步骤 5: 使用持久化机制确保数据不被覆盖 ==========
+      log('[切号] ========== 步骤 5: 启用持久化保护机制 ==========');
+      
+      // 使用新的持久化模块
+      const ConfigPersister = require('./configPersister');
+      const persister = new ConfigPersister();
+      
+      // 准备账号数据
+      const accountData = {
+        email: account.email,
+        name: name,
+        apiKey: apiKey,
+        apiServerUrl: apiServerUrl || "https://server.self-serve.windsurf.com"
+      };
+      
+      if (skipClose) {
+        // Windsurf 正在运行，使用强制写入模式
+        log('[切号] Windsurf 正在运行，使用强制写入模式...');
+        
+        // 强制写入 5 次，确保数据生效
+        const forceSuccess = await persister.forceWrite(accountData, 5, 1000);
+        
+        if (forceSuccess) {
+          log('[切号] ✅ 强制写入成功，数据已生效');
+          
+          // 启动监控模式，防止被覆盖
+          log('[切号] 启动监控模式，持续保护配置...');
+          await persister.startMonitoring(accountData, {
+            interval: 3000,     // 每 3 秒检查一次
+            maxRetries: 20,     // 最多重试 20 次
+            autoRecover: true   // 自动恢复
+          });
+          
+          // 10 秒后自动停止监控
+          setTimeout(() => {
+            persister.stopMonitoring();
+            log('[切号] 监控模式已停止');
+          }, 10000);
+          
+          log('[切号] 💡 请刷新 Windsurf 查看登录状态');
+        } else {
+          log('[切号] ⚠️ 强制写入失败，请手动重启 Windsurf');
+        }
+      } else {
+        // 正常流程：启动 Windsurf
+        log('[切号] ========== 步骤 6: 启动 Windsurf ==========');
+        
+        log('[切号] 正在启动 Windsurf...');
         await WindsurfPathDetector.startWindsurf();
         log('[切号] ✅ Windsurf 已启动');
-        log('[切号] 请等待 Windsurf 完全启动后查看效果');
-      } catch (error) {
-        log(`[切号] ⚠️ 自动启动失败: ${error.message}`);
-        log('[切号] 请手动启动 Windsurf 查看效果');
+        
+        // 等待 Windsurf 初始化
+        log('[切号] 等待 Windsurf 初始化...');
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        // 使用持久化写入
+        log('[切号] 开始持久化写入...');
+        const writeSuccess = await persister.forceWrite(accountData, 3, 2000);
+        
+        if (writeSuccess) {
+          log('[切号] ✅ 数据写入成功');
+          
+          // 启动短时监控，确保数据不被覆盖
+          log('[切号] 启动短时监控...');
+          await persister.startMonitoring(accountData, {
+            interval: 2000,     // 每 2 秒检查一次
+            maxRetries: 10,     // 最多重试 10 次
+            autoRecover: true   // 自动恢复
+          });
+          
+          // 15 秒后停止监控
+          setTimeout(() => {
+            persister.stopMonitoring();
+            log('[切号] 监控已停止');
+          }, 15000);
+        } else {
+          log('[切号] ⚠️ 数据写入失败，请重试');
+        }
       }
+      
+      log('[切号] ========== 切换完成 ==========');
+      log(`[切号] 账号: ${account.email}`);
+      log(`[切号] 用户名: ${name}`);
+      log('[切号] 💡 请等待 Windsurf 完全加载后查看登录状态');
       
       return {
         success: true,
@@ -645,7 +982,7 @@ async function switchToAccount(accountId) {
     modal.className = 'modal-overlay active';
     modal.style.zIndex = '10000';
     modal.innerHTML = `
-      <div class="modal-dialog modern-modal" style="max-width: 700px;" onclick="event.stopPropagation()">
+      <div class="modal-dialog modern-modal" style="max-width: 550px;" onclick="event.stopPropagation()">
         <div class="modern-modal-header">
           <div class="modal-title-row">
             <i data-lucide="refresh-cw" style="width: 24px; height: 24px; color: #007aff;"></i>
@@ -662,7 +999,7 @@ async function switchToAccount(accountId) {
             <div style="font-size: 15px; font-weight: 600; color: #1d1d1f;">${account.email}</div>
           </div>
           
-          <div style="background: #1d1d1f; border-radius: 8px; padding: 16px; height: 400px; overflow-y: auto; font-family: 'Monaco', 'Menlo', monospace; font-size: 12px; line-height: 1.6;" id="switchLogContainer">
+          <div style="background: #1d1d1f; border-radius: 8px; padding: 12px; height: 240px; overflow-y: auto; font-family: 'Monaco', 'Menlo', monospace; font-size: 11px; line-height: 1.5;" id="switchLogContainer">
             <div style="color: #34c759;">🚀 准备切换账号...</div>
           </div>
         </div>
@@ -687,53 +1024,78 @@ async function switchToAccount(accountId) {
     const closeBtn = document.getElementById('closeSwitchModal');
     
     // 添加日志函数
-    function addLog(message, type = 'info') {
-      const colors = {
-        info: '#ffffff',
-        success: '#34c759',
-        warning: '#ff9500',
-        error: '#ff3b30'
-      };
-      const color = colors[type] || colors.info;
-      const time = new Date().toLocaleTimeString('zh-CN');
+    function addLog(message) {
+      // 解析日志类型
+      let color = '#ffffff';
+      if (message.includes('✅') || message.includes('成功')) {
+        color = '#34c759';
+      } else if (message.includes('❌') || message.includes('失败') || message.includes('错误')) {
+        color = '#ff3b30';
+      } else if (message.includes('⚠️') || message.includes('警告')) {
+        color = '#ff9500';
+      } else if (message.includes('==========')) {
+        color = '#007aff';
+      }
+      
       const log = document.createElement('div');
       log.style.color = color;
-      log.textContent = `[${time}] ${message}`;
+      log.textContent = message;
       logContainer.appendChild(log);
       logContainer.scrollTop = logContainer.scrollHeight;
-    }
-    
-    try {
-      addLog(`目标账号: ${account.email}`, 'info');
-      addLog('开始切换流程...', 'info');
       
-      // 执行切换
-      const result = await window.ipcRenderer.invoke('switch-account', account);
-      
-      if (result.success) {
-        addLog('✅ 切换成功！', 'success');
-        addLog(`账号: ${result.email}`, 'success');
-        addLog(`用户名: ${result.name}`, 'success');
-        addLog('', 'info');
-        addLog('⚠️ 请手动启动 Windsurf 查看效果', 'warning');
+      // 更新状态
+      if (message.includes('切换完成')) {
         statusEl.textContent = '✅ 切换成功';
         statusEl.style.color = '#34c759';
-      } else {
-        addLog(`❌ 切换失败: ${result.error}`, 'error');
+        closeBtn.style.display = 'block';
+      } else if (message.includes('切换失败')) {
         statusEl.textContent = '❌ 切换失败';
         statusEl.style.color = '#ff3b30';
+        closeBtn.style.display = 'block';
+      }
+    }
+    
+    // 监听实时日志
+    const logListener = (event, log) => {
+      addLog(log);
+    };
+    window.ipcRenderer.on('switch-log', logListener);
+    
+    try {
+      // 检查 Windsurf 是否正在运行
+      const isRunning = await window.ipcRenderer.invoke('check-windsurf-running');
+      const skipClose = isRunning; // 如果正在运行，跳过关闭
+      
+      if (skipClose) {
+        addLog('⚠️ 检测到 Windsurf 正在运行，将直接写入数据（不关闭）');
+        addLog('💡 这可能会更快，但需要刷新 Windsurf 才能看到效果');
+      }
+      
+      // 执行切换（通过 IPC 调用）
+      const result = await window.ipcRenderer.invoke('switch-account', account, skipClose);
+      
+      if (!result.success) {
+        addLog(`❌ 切换失败: ${result.error}`);
+        statusEl.textContent = '❌ 切换失败';
+        statusEl.color = '#ff3b30';
       }
       
     } catch (error) {
       console.error('切换账号失败:', error);
-      addLog(`❌ 发生错误: ${error.message}`, 'error');
+      addLog(`❌ 发生错误: ${error.message}`);
       statusEl.textContent = '❌ 发生错误';
       statusEl.style.color = '#ff3b30';
+    } finally {
+      // 移除日志监听器
+      window.ipcRenderer.removeListener('switch-log', logListener);
+      closeBtn.style.display = 'block';
     }
     
-    // 显示关闭按钮
-    closeBtn.style.display = 'block';
-    closeBtn.onclick = () => modal.remove();
+    // 关闭按钮
+    closeBtn.onclick = () => {
+      window.ipcRenderer.removeListener('switch-log', logListener);
+      modal.remove();
+    };
     
     // 点击背景关闭
     modal.onclick = (e) => {
@@ -766,4 +1128,11 @@ async function getCurrentWindsurfAccount() {
     console.error('获取当前账号失败:', error);
     return null;
   }
+}
+
+// 确保 switchToAccount 函数在全局作用域可用
+if (typeof window !== 'undefined') {
+  window.switchToAccount = switchToAccount;
+  window.getCurrentWindsurfAccount = getCurrentWindsurfAccount;
+  console.log('✅ accountSwitcher.js: switchToAccount 函数已注册到全局作用域');
 }

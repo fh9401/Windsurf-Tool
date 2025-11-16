@@ -3342,10 +3342,14 @@
       }
       
       // 如果切换到设置页面，加载配置文件路径并显示悬浮保存按钮
-      const floatingSaveBtn = document.querySelector('.floating-save-btn');
+      const floatingSaveBtn = document.querySelector('.save-btn');
       if (viewName === 'settings') {
         loadConfigPath();
         if (floatingSaveBtn) floatingSaveBtn.style.display = 'flex';
+        // 重新初始化域名管理器
+        if (typeof initDomainManager === 'function') {
+          initDomainManager();
+        }
       } else {
         if (floatingSaveBtn) floatingSaveBtn.style.display = 'none';
       }
