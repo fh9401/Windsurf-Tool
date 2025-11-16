@@ -9,6 +9,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -35,6 +38,8 @@ jobs:
       
       - name: Build Windows ${{ matrix.arch }}
         run: npm run build:win:${{ matrix.arch }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Upload Windows ${{ matrix.arch }} artifacts
         uses: actions/upload-artifact@v4
