@@ -132,20 +132,25 @@
     },
     "win": {
       "target": [
-        "nsis"
+        {
+          "target": "nsis",
+          "arch": ["x64", "arm64"]
+        }
       ],
       "icon": "build/icon.ico",
       "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
-      "requestedExecutionLevel": "requireAdministrator",
+      "requestedExecutionLevel": "asInvoker",
       "verifyUpdateCodeSignature": false,
-      "publisherName": "Windsurf Tool"
+      "publisherName": "Windsurf Tool",
+      "signingHashAlgorithms": ["sha256"]
     },
     "nsis": {
       "oneClick": false,
       "allowElevation": true,
       "allowToChangeInstallationDirectory": true,
-      "perMachine": true,
+      "perMachine": false,
       "deleteAppDataOnUninstall": false,
+      "removeAppDataOnUninstall": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Windsurf-Tool",
@@ -159,7 +164,8 @@
         "zh_CN",
         "en_US"
       ],
-      "language": "2052"
+      "language": "2052",
+      "include": "build-scripts/installer.nsh"
     },
     "linux": {
       "target": [
